@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Devtron Env Converter</title>
+<style>
+  :root {
+    --bg: #f7f7f5; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66;
+    --border: #dddcd6; --accent: #2f6f4f; --accent-text: #ffffff;
+    --warn-bg: #fff5e0; --warn-text: #7a4b00; --code-bg: #fbfbf9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #161615; --panel: #1f1f1d; --text: #ecebe6; --muted: #9b9a93;
+      --border: #34332f; --accent: #5fae86; --accent-text: #0f1a14;
+      --warn-bg: #3a2c12; --warn-text: #f3c77a; --code-bg: #1a1a18;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #161615; --panel: #1f1f1d; --text: #ecebe6; --muted: #9b9a93;
+    --border: #34332f; --accent: #5fae86; --accent-text: #0f1a14;
+    --warn-bg: #3a2c12; --warn-text: #f3c77a; --code-bg: #1a1a18;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1200px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px; display: flex; flex-direction: column; min-width: 0; }
+  .panel h2 { font-size: 14px; margin: 0 0 8px; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  textarea { width: 100%; min-height: 420px; resize: vertical; padding: 10px;
+    border: 1px solid var(--border); border-radius: 8px; background: var(--code-bg); color: var(--text);
+    font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; }
+  .opts { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 10px 0 0; font-size: 13px; color: var(--muted); }
+  .opts label { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
+  .btns { display: flex; gap: 8px; }
+  button { font: inherit; font-size: 13px; padding: 5px 12px; border-radius: 7px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--panel); color: var(--text); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  .count { font-weight: 400; color: var(--muted); font-size: 13px; }
+  .warns { margin: 12px 0 0; padding: 10px 12px; border-radius: 8px; background: var(--warn-bg);
+    color: var(--warn-text); font-size: 13px; }
+  .warns:empty { display: none; }
+  .warns ul { margin: 4px 0 0; padding-left: 18px; }
+  .note { margin-top: 16px; color: var(--muted); font-size: 13px; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Devtron env → .env</h1>
+  <p class="sub">Paste the env block from Devtron (deployment template <code>- name / value</code> list, or a ConfigMap/Secret <code>KEY: value</code> map). You get lines you can drop into <code>.env.local</code>.</p>
+
+  <div class="grid">
+    <section class="panel">
+      <h2>Devtron YAML <span class="btns"><button id="clear">Clear</button></span></h2>
+      <textarea id="input" spellcheck="false" placeholder="- name: NEW_RELIC_LOG_LEVEL
+  value: info
+- name: NEW_RELIC_DISTRIBUTED_TRACING_ENABLED
+  value: &quot;true&quot;"></textarea>
+      <div class="opts">
+        <label><input type="checkbox" id="optDollar" checked> Escape <code>$</code> (Next.js expands <code>$VAR</code>)</label>
+        <label><input type="checkbox" id="optSort"> Sort keys A→Z</label>
+        <label><input type="checkbox" id="optEmpty" checked> Keep empty values</label>
+      </div>
+    </section>
+    <section class="panel">
+      <h2>.env <span class="count" id="count"></span>
+        <span class="btns"><button id="copy" class="primary">Copy</button><button id="download">Download .env.local</button></span></h2>
+      <textarea id="output" spellcheck="false" readonly></textarea>
+    </section>
+  </div>
+  <div class="warns" id="warns"></div>
+  <p class="note">Runs only in this page. Nothing is sent anywhere or saved, so pasted secrets stay on your machine.</p>
+</main>
+
+<script>
+// ---- parser (pure; tested with node) ----
+function unquoteYaml(raw) {
+  let v = raw.trim();
+  // strip a trailing YAML comment when the value is not quoted
+  if (!/^["']/.test(v)) { const m = v.match(/^(.*?)\s+#.*$/); if (m) v = m[1]; return v.trim(); }
+  if (v.startsWith('"')) {
+    const end = v.lastIndexOf('"');
+    const body = v.slice(1, end > 0 ? end : undefined);
+    return body.replace(/\\(["\\\/bfnrt]|u[0-9a-fA-F]{4})/g, (_, e) => {
+      if (e[0] === 'u') return String.fromCharCode(parseInt(e.slice(1), 16));
+      return { '"': '"', '\\': '\\', '/': '/', b: '\b', f: '\f', n: '\n', r: '\r', t: '\t' }[e];
+    });
+  }
+  const end = v.lastIndexOf("'");
+  return v.slice(1, end > 0 ? end : undefined).replace(/''/g, "'");
+}
+
+function readBlock(lines, i, indentOf) {
+  // YAML block scalar after "value: |" or ">": collect deeper-indented lines
+  const out = []; let j = i + 1; let base = null;
+  for (; j < lines.length; j++) {
+    const l = lines[j];
+    if (l.trim() === '') { out.push(''); continue; }
+    const ind = l.match(/^\s*/)[0].length;
+    if (ind <= indentOf) break;
+    if (base === null) base = ind;
+    out.push(l.slice(base));
+  }
+  while (out.length && out[out.length - 1] === '') out.pop();
+  return { text: out.join('\n'), next: j };
+}
+
+function parseDevtron(text) {
+  const lines = text.replace(/\r\n?/g, '\n').split('\n');
+  const entries = []; const warnings = [];
+  let cur = null;
+  const push = () => { if (cur) { entries.push(cur); cur = null; } };
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const t = line.trim();
+    if (!t || t.startsWith('#') || /^(env|envVariables|data|stringData)\s*:\s*$/.test(t)) continue;
+    const indent = line.match(/^\s*/)[0].length;
+    let m;
+    if ((m = t.match(/^-\s*name\s*:\s*(.+)$/))) {         // list form: - name: KEY
+      push(); cur = { key: unquoteYaml(m[1]), value: undefined, line: i + 1 }; continue;
+    }
+    if (cur && (m = t.match(/^value\s*:\s*(.*)$/))) {
+      const rest = m[1].trim();
+      if (/^[|>][-+]?$/.test(rest)) {
+        const b = readBlock(lines, i, indent);
+        cur.value = rest[0] === '>' ? b.text.replace(/\n(?!\n)/g, ' ') : b.text;
+        i = b.next - 1;
+      } else cur.value = rest === '' ? '' : unquoteYaml(rest);
+      continue;
+    }
+    if (cur && /^valueFrom\s*:/.test(t)) {
+      // collect secretKeyRef / configMapKeyRef / fieldRef details
+      let ref = []; let j = i + 1;
+      for (; j < lines.length; j++) {
+        const l = lines[j]; if (!l.trim()) continue;
+        if (l.match(/^\s*/)[0].length <= indent) break;
+        ref.push(l.trim());
+      }
+      cur.ref = ref.join(' ');
+      i = j - 1; continue;
+    }
+    if ((m = t.match(/^-?\s*([A-Za-z_][A-Za-z0-9_.-]*)\s*:\s*(.*)$/)) && !cur) {  // map form: KEY: value
+      const rest = m[2].trim();
+      let value;
+      if (/^[|>][-+]?$/.test(rest)) {
+        const b = readBlock(lines, i, indent);
+        value = rest[0] === '>' ? b.text.replace(/\n(?!\n)/g, ' ') : b.text; i = b.next - 1;
+      } else value = unquoteYaml(rest);
+      entries.push({ key: m[1], value, line: i + 1 });
+      continue;
+    }
+    if (cur && /^(name|value)\s*:/.test(t) === false && /^-/.test(t) === false) {
+      warnings.push(`Line ${i + 1} ignored: ${t.slice(0, 60)}`);
+      continue;
+    }
+    if (!cur) warnings.push(`Line ${i + 1} not understood: ${t.slice(0, 60)}`);
+  }
+  push();
+  return { entries, warnings };
+}
+
+function quoteEnv(value, escapeDollar) {
+  let v = value;
+  if (escapeDollar) v = v.replace(/\$/g, '\\$');
+  if (v === '') return '';
+  const plain = /^[A-Za-z0-9_\-.,:/@+=%~^*!?\[\]{}()\\$]+$/.test(v);
+  if (plain && !v.includes('\n')) return v;
+  if (!v.includes("'") && !v.includes('\n')) return `'${v}'`;
+  if (!v.includes('"')) return `"${v.replace(/\n/g, '\\n')}"`;
+  if (!v.includes('`') && !v.includes('\n')) return '`' + v + '`';
+  return `"${v.replace(/\n/g, '\\n').replace(/"/g, '\\"')}"`;
+}
+
+function toEnv(text, opts) {
+  const { entries, warnings } = parseDevtron(text);
+  const seen = new Map(); const out = [];
+  for (const e of entries) {
+    if (seen.has(e.key)) warnings.push(`${e.key} appears twice (line ${seen.get(e.key)} and ${e.line}); the last one wins.`);
+    seen.set(e.key, e.line);
+  }
+  const last = new Map(); for (const e of entries) last.set(e.key, e);
+  let list = [...last.values()];
+  if (opts.sort) list.sort((a, b) => a.key.localeCompare(b.key));
+  let n = 0;
+  for (const e of list) {
+    if (e.ref !== undefined && e.value === undefined) {
+      out.push(`# ${e.key}=  (valueFrom: ${e.ref})`);
+      warnings.push(`${e.key} comes from a reference (${e.ref}). Fill it in by hand.`);
+      continue;
+    }
+    const v = e.value ?? '';
+    if (v === '' && !opts.keepEmpty) continue;
+    out.push(`${e.key}=${quoteEnv(v, opts.escapeDollar)}`); n++;
+  }
+  return { env: out.join('\n') + (out.length ? '\n' : ''), count: n, warnings };
+}
+
+if (typeof module !== 'undefined') module.exports = { parseDevtron, toEnv, quoteEnv };
+
+// ---- UI ----
+if (typeof document !== 'undefined') {
+  const $ = (id) => document.getElementById(id);
+  const render = () => {
+    const r = toEnv($('input').value, {
+      escapeDollar: $('optDollar').checked, sort: $('optSort').checked, keepEmpty: $('optEmpty').checked,
+    });
+    $('output').value = r.env;
+    $('count').textContent = r.count ? `${r.count} variable${r.count === 1 ? '' : 's'}` : '';
+    $('warns').innerHTML = r.warnings.length
+      ? '<strong>Check these:</strong><ul>' + r.warnings.map((w) => `<li>${w.replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]))}</li>`).join('') + '</ul>'
+      : '';
+  };
+  ['input', 'optDollar', 'optSort', 'optEmpty'].forEach((id) => $(id).addEventListener('input', render));
+  $('clear').addEventListener('click', () => { $('input').value = ''; render(); $('input').focus(); });
+  $('copy').addEventListener('click', async () => {
+    const b = $('copy');
+    try { await navigator.clipboard.writeText($('output').value); b.textContent = 'Copied'; }
+    catch { $('output').select(); document.execCommand('copy'); b.textContent = 'Copied'; }
+    setTimeout(() => (b.textContent = 'Copy'), 1200);
+  });
+  $('download').addEventListener('click', () => {
+    const blob = new Blob([$('output').value], { type: 'text/plain' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = '.env.local';
+    a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  });
+  render();
+}
+</script>
+</body>
+</html>
